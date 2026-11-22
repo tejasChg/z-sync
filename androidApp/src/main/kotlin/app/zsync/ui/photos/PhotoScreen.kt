@@ -57,9 +57,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -172,6 +176,10 @@ fun PhotoRoute(internetAvailable: Boolean, model: PhotoViewModel) {
                 status = if (model.savedPreviewHandle == row.handle) model.savedPreviewStatus else null,
                 onBack = { downloadPreview = null },
                 onAskDelete = { pendingGalleryDelete = row.handle },
+                onProcess = { watermarkText, style ->
+                    model.processSaved(row.handle, watermarkText, style, 1.0f)
+                },
+                processStatus = model.processStatus,
             )
         }
     } else if (showDownloads) {
@@ -1225,7 +1233,15 @@ private fun DownloadPreview(
     status: String?,
     onBack: () -> Unit,
     onAskDelete: () -> Unit,
+    onProcess: (watermarkText: String, style: String) -> Unit,
+    processStatus: String? = null,
 ) {
+    var showProcessDialog by remember { mutableStateOf(false) }
+    var watermarkText by remember { mutableStateOf("") }
+    var selectedStyle by remember { mutableStateOf("sharp") }
+    var styleMenuOpen by remember { mutableStateOf(false) }
+    val canProcess = row.name.endsWith(".JPG", ignoreCase = true) ||
+        row.name.endsWith(".JPEG", ignoreCase = true)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1280,6 +1296,31 @@ private fun DownloadPreview(
             fontSize = 13.sp,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
+        if (canProcess) {
+            Text(
+                "处理此图",
+                color = Ink,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .border(1.dp, Line, RoundedCornerShape(12.dp))
+                    .clickable {
+                        watermarkText = ""
+                        selectedStyle = "sharp"
+                        styleMenuOpen = false
+                        showProcessDialog = true
+                    }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+        processStatus?.let { message ->
+            Text(
+                message,
+                color = Muted,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
         Text(
             "从相册删除",
             color = Ink,
@@ -1289,6 +1330,78 @@ private fun DownloadPreview(
                 .border(1.dp, Line, RoundedCornerShape(12.dp))
                 .clickable(onClick = onAskDelete)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
+        )
+    }
+    if (showProcessDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showProcessDialog = false
+                styleMenuOpen = false
+            },
+            title = { Text("处理此图", color = Ink) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = watermarkText,
+                        onValueChange = { watermarkText = it },
+                        label = { Text("水印文字") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "滤镜风格",
+                        color = Muted,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    Box {
+                        Text(
+                            selectedStyle,
+                            color = Ink,
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { styleMenuOpen = true }
+                                .padding(vertical = 10.dp),
+                        )
+                        DropdownMenu(
+                            expanded = styleMenuOpen,
+                            onDismissRequest = { styleMenuOpen = false },
+                        ) {
+                            listOf("sharp", "smooth").forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option) },
+                                    onClick = {
+                                        selectedStyle = option
+                                        styleMenuOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showProcessDialog = false
+                        styleMenuOpen = false
+                        onProcess(watermarkText, selectedStyle)
+                    },
+                ) {
+                    Text("确认")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showProcessDialog = false
+                        styleMenuOpen = false
+                    },
+                ) {
+                    Text("取消")
+                }
+            },
         )
     }
 }

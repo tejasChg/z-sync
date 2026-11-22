@@ -8,6 +8,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import app.zsync.gallery.CameraFile
 import app.zsync.gallery.MediaFilter
@@ -35,6 +37,8 @@ import app.zsync.gallery.syncTransfer
 import app.zsync.gallery.TransferFiles
 import app.zsync.gallery.shouldLoadMore
 import app.zsync.gallery.sortedPhotos
+import app.zsync.image.addWatermark
+import app.zsync.image.applyStyle
 import app.zsync.link.LOG_TAG
 import android.os.SystemClock
 import app.zsync.gallery.PreviewLoadTracker
@@ -59,6 +63,7 @@ import app.zsync.ptp.recoveryStatus
 import app.zsync.session.DisconnectCause
 import app.zsync.session.TraceEvent
 import app.zsync.ptp.reduce
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -142,6 +147,8 @@ class PhotoViewModel(
     var savedPreviewHandle by mutableStateOf<Long?>(null)
         private set
     var savedPreviewStatus by mutableStateOf<String?>(null)
+        private set
+    var processStatus by mutableStateOf<String?>(null)
         private set
     private var started = false
     var loadingMore by mutableStateOf(false)
@@ -403,6 +410,73 @@ class PhotoViewModel(
                     read is SavedOriginal.Missing -> "相册里没有这张原图"
                     else -> "原图打不开"
                 }
+            }
+        }
+    }
+
+    /**
+     * Applies the watermark and filter engines to a saved JPEG and stores the result as a new
+     * album row. Only the JPEG branch of [PhoneGallery.readSaved] can be decoded and re-encoded;
+     * RAW and missing originals report a short status instead. The original bytes are reused as the
+     * EXIF source, and every intermediate bitmap is recycled after compression.
+     */
+    fun processSaved(handle: Long, watermarkText: String, style: String, intensity: Float) {
+        val row = saves.find { it.handle == handle }
+        if (row == null) {
+            processStatus = "找不到这张下载记录"
+            return
+        }
+        val displayName = row.savedName ?: row.name
+        processStatus = "正在处理 ${row.name}…"
+        viewModelScope.launch(Dispatchers.IO) {
+            val original = try {
+                gallery.readSaved(displayName)
+            } catch (failed: Exception) {
+                QuickLog.e(
+                    LOG_TAG,
+                    "process read failed name=$displayName ${failed.javaClass.simpleName}: ${failed.message}",
+                )
+                ui { processStatus = "读取原图失败" }
+                return@launch
+            }
+            if (original !is SavedOriginal.Jpeg) {
+                ui { processStatus = "仅支持 JPEG" }
+                return@launch
+            }
+
+            val originalBytes = original.bytes
+            val decoded = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size)
+            if (decoded == null) {
+                ui { processStatus = "原图无法解码" }
+                return@launch
+            }
+
+            var watermarked: Bitmap? = null
+            var styled: Bitmap? = null
+            try {
+                val watermarkedBitmap = addWatermark(decoded, watermarkText)
+                watermarked = watermarkedBitmap
+                val styledBitmap = applyStyle(watermarkedBitmap, style, intensity)
+                styled = styledBitmap
+                val processedBytes = ByteArrayOutputStream().use { output ->
+                    if (!styledBitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) {
+                        error("JPEG 压缩失败")
+                    }
+                    output.toByteArray()
+                }
+                val newName = displayName.substringBeforeLast('.', displayName) + "_watermarked.jpg"
+                val savedName = gallery.saveProcessed(newName, processedBytes, originalBytes)
+                ui { processStatus = "已保存 $savedName" }
+            } catch (failed: Exception) {
+                QuickLog.e(
+                    LOG_TAG,
+                    "process save failed name=$displayName ${failed.javaClass.simpleName}: ${failed.message}",
+                )
+                ui { processStatus = "处理失败：${failed.message ?: failed.javaClass.simpleName}" }
+            } finally {
+                if (styled != null && styled !== watermarked) styled.recycle()
+                if (watermarked != null && watermarked !== decoded) watermarked.recycle()
+                decoded.recycle()
             }
         }
     }

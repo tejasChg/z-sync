@@ -6,6 +6,8 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.net.Uri
 import android.provider.MediaStore
+import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import app.zsync.link.LOG_TAG
 import app.zsync.gallery.MediaCollection
 import app.zsync.gallery.ByteSource
@@ -73,6 +75,59 @@ class PhoneGallery(private val resolver: ContentResolver) {
     fun save(file: CameraFile, source: File): String {
         if (source.length() != file.bytes) error("refuse partial ${file.name}")
         return writePending(file) { stream -> source.inputStream().use { input -> input.copyTo(stream) } }
+    }
+
+    /**
+     * Saves a processed JPEG as a new file in Pictures/Z-Sync.
+     *
+     * The original image is never overwritten: [displayName] is only a request, and MediaStore adds
+     * a " (1)" suffix if that name already exists. [exifSource] is used solely as a metadata source;
+     * EXIF propagation is best-effort and a failure there is logged without failing the save.
+     */
+    fun saveProcessed(displayName: String, processedBytes: ByteArray, exifSource: ByteArray?): String {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Z-Sync")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("相册拒绝了 $displayName")
+        try {
+            resolver.openOutputStream(uri)?.use { stream -> stream.write(processedBytes) }
+                ?: error("写不进 $displayName")
+            val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            resolver.update(uri, done, null, null)
+            if (exifSource != null) copyExif(uri, displayName, exifSource)
+        } catch (failed: Exception) {
+            resolver.delete(uri, null, null)
+            throw failed
+        }
+        return displayName
+    }
+
+    private fun copyExif(uri: Uri, displayName: String, exifSource: ByteArray) {
+        try {
+            val source = exifSource.inputStream().use { ExifInterface(it) }
+            val targetFile = resolver.openFileDescriptor(uri, "rw")
+            if (targetFile == null) {
+                Log.w(LOG_TAG, "exif copy skipped: no file descriptor for $displayName")
+                return
+            }
+            targetFile.use { pfd ->
+                val target = ExifInterface(pfd.fileDescriptor)
+                var copied = 0
+                for (tag in PROCESSED_EXIF_TAGS) {
+                    source.getAttribute(tag)?.let { value ->
+                        target.setAttribute(tag, value)
+                        copied += 1
+                    }
+                }
+                if (copied > 0) target.saveAttributes()
+            }
+        } catch (failed: Exception) {
+            Log.w(LOG_TAG, "exif copy failed for $displayName: ${failed.javaClass.simpleName}: ${failed.message}")
+        }
     }
 
     /** Returns the display name MediaStore actually stored, which differs when it renames a collision. */
@@ -242,3 +297,23 @@ class PhoneGallery(private val resolver: ContentResolver) {
 
     private data class Hit(val id: Long, val name: String, val mime: String?)
 }
+
+/** Metadata worth carrying from the original JPEG onto a processed copy. */
+private val PROCESSED_EXIF_TAGS = arrayOf(
+    ExifInterface.TAG_DATETIME_ORIGINAL,
+    ExifInterface.TAG_MAKE,
+    ExifInterface.TAG_MODEL,
+    ExifInterface.TAG_F_NUMBER,
+    ExifInterface.TAG_EXPOSURE_TIME,
+    ExifInterface.TAG_ISO_SPEED_RATINGS,
+    ExifInterface.TAG_FOCAL_LENGTH,
+    ExifInterface.TAG_GPS_LATITUDE,
+    ExifInterface.TAG_GPS_LATITUDE_REF,
+    ExifInterface.TAG_GPS_LONGITUDE,
+    ExifInterface.TAG_GPS_LONGITUDE_REF,
+    ExifInterface.TAG_GPS_ALTITUDE,
+    ExifInterface.TAG_GPS_ALTITUDE_REF,
+    ExifInterface.TAG_GPS_TIMESTAMP,
+    ExifInterface.TAG_GPS_DATESTAMP,
+    ExifInterface.TAG_GPS_PROCESSING_METHOD,
+)
